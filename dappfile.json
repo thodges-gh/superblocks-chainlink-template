@@ -7,25 +7,7 @@
     },
     "environments": [
         {
-            "name": "browser"
-        },
-        {
-            "name": "custom"
-        },
-        {
-            "name": "rinkeby"
-        },
-        {
             "name": "ropsten"
-        },
-        {
-            "name": "kovan"
-        },
-        {
-            "name": "infuranet"
-        },
-        {
-            "name": "mainnet"
         }
     ],
     "contracts": [
