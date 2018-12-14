@@ -3,7 +3,7 @@ pragma solidity ^0.4.25;
 import "./lib/Chainlinked.sol";
 import "./lib/Ownable.sol";
 
-contract ARopstenConsumer is Chainlinked, Ownable {
+contract MyContract is Chainlinked, Ownable {
   uint256 constant private ORACLE_PAYMENT = 1 * LINK; // solium-disable-line zeppelin/no-arithmetic-operations
 
   uint256 public currentPrice;
