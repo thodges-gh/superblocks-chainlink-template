@@ -212,21 +212,21 @@ library ChainlinkLib {
   using CBOR for Buffer.buffer;
 
   struct Run {
-    bytes32 specId;
+    bytes32 id;
     address callbackAddress;
     bytes4 callbackFunctionId;
-    bytes32 requestId;
+    uint256 nonce;
     Buffer.buffer buf;
   }
 
   function initialize(
     Run memory self,
-    bytes32 _specId,
+    bytes32 _id,
     address _callbackAddress,
     bytes4 _callbackFunction
   ) internal pure returns (ChainlinkLib.Run memory) {
     Buffer.init(self.buf, defaultBufferSize);
-    self.specId = _specId;
+    self.id = _id;
     self.callbackAddress = _callbackAddress;
     self.callbackFunctionId = _callbackFunction;
     self.buf.startMap();
@@ -327,37 +327,18 @@ interface LinkTokenInterface {
   function transferFrom(address from, address to, uint256 value) external returns (bool success);
 }
 
-// File: ../solidity/contracts/interfaces/OracleInterface.sol
+// File: ../solidity/contracts/interfaces/ChainlinkRequestInterface.sol
 
-interface OracleInterface {
-  function cancel(bytes32 externalId) external;
-  function fulfillData(uint256 internalId, bytes32 data) external returns (bool);
-  function getAuthorizationStatus(address node) external view returns (bool);
+interface ChainlinkRequestInterface {
+  function cancel(bytes32 requestId) external;
   function requestData(
     address sender,
     uint256 amount,
     uint256 version,
-    bytes32 specId,
+    bytes32 id,
     address callbackAddress,
     bytes4 callbackFunctionId,
-    bytes32 externalId,
-    bytes data
-  ) external;
-  function setFulfillmentPermission(address node, bool allowed) external;
-  function withdraw(address recipient, uint256 amount) external;
-}
-
-// File: ../solidity/contracts/interfaces/CoordinatorInterface.sol
-
-interface CoordinatorInterface {
-  function executeServiceAgreement(
-    address sender,
-    uint256 amount,
-    uint256 version,
-    bytes32 sAId,
-    address callbackAddress,
-    bytes4 callbackFunctionId,
-    bytes32 externalId,
+    uint256 nonce,
     bytes data
   ) external;
 }
@@ -420,18 +401,17 @@ contract Chainlinked {
   using ChainlinkLib for ChainlinkLib.Run;
   using SafeMath for uint256;
 
-  uint256 constant private clArgsVersion = 1;
-  uint256 constant private linkDivisibility = 10**18;
-
-  LinkTokenInterface private link;
-  OracleInterface private oracle;
-  uint256 private requests = 1;
-  mapping(bytes32 => address) private unfulfilledRequests;
+  uint256 constant internal LINK = 10**18;
+  uint256 constant private ARGS_VERSION = 1;
+  bytes32 constant private ENS_TOKEN_SUBNAME = keccak256("link");
+  bytes32 constant private ENS_ORACLE_SUBNAME = keccak256("oracle");
 
   ENSInterface private ens;
   bytes32 private ensNode;
-  bytes32 constant private ensTokenSubname = keccak256("link");
-  bytes32 constant private ensOracleSubname = keccak256("oracle");
+  LinkTokenInterface private link;
+  ChainlinkRequestInterface private oracle;
+  uint256 private requests = 1;
+  mapping(bytes32 => address) private unfulfilledRequests;
 
   event ChainlinkRequested(bytes32 id);
   event ChainlinkFulfilled(bytes32 id);
@@ -455,33 +435,30 @@ contract Chainlinked {
 
   function chainlinkRequestFrom(address _oracle, ChainlinkLib.Run memory _run, uint256 _amount)
     internal
-    returns (bytes32)
+    returns (bytes32 requestId)
   {
-    _run.requestId = bytes32(requests);
-    requests += 1;
+    requestId = keccak256(abi.encodePacked(this, requests));
+    _run.nonce = requests;
     _run.close();
-    unfulfilledRequests[_run.requestId] = _oracle;
-    emit ChainlinkRequested(_run.requestId);
-    require(link.transferAndCall(_oracle, _amount, encodeForOracle(_run)), "unable to transferAndCall to oracle");
-
-    return _run.requestId;
+    unfulfilledRequests[requestId] = _oracle;
+    emit ChainlinkRequested(requestId);
+    require(link.transferAndCall(_oracle, _amount, encodeRequest(_run)), "unable to transferAndCall to oracle");
+    requests += 1;
+    
+    return requestId;
   }
 
   function cancelChainlinkRequest(bytes32 _requestId)
     internal
   {
-    OracleInterface requested = OracleInterface(unfulfilledRequests[_requestId]);
+    ChainlinkRequestInterface requested = ChainlinkRequestInterface(unfulfilledRequests[_requestId]);
     delete unfulfilledRequests[_requestId];
     emit ChainlinkCancelled(_requestId);
     requested.cancel(_requestId);
   }
 
-  function LINK(uint256 _amount) internal pure returns (uint256) {
-    return _amount.mul(linkDivisibility);
-  }
-
   function setOracle(address _oracle) internal {
-    oracle = OracleInterface(_oracle);
+    oracle = ChainlinkRequestInterface(_oracle);
   }
 
   function setLinkToken(address _link) internal {
@@ -504,6 +481,13 @@ contract Chainlinked {
     return address(oracle);
   }
 
+  function addExternalRequest(address _oracle, bytes32 _requestId)
+    internal
+    isUnfulfilledRequest(_requestId)
+  {
+    unfulfilledRequests[_requestId] = _oracle;
+  }
+
   function newChainlinkWithENS(address _ens, bytes32 _node)
     internal
     returns (address, address)
@@ -511,7 +495,7 @@ contract Chainlinked {
     ens = ENSInterface(_ens);
     ensNode = _node;
     ENSResolver resolver = ENSResolver(ens.resolver(ensNode));
-    bytes32 linkSubnode = keccak256(abi.encodePacked(ensNode, ensTokenSubname));
+    bytes32 linkSubnode = keccak256(abi.encodePacked(ensNode, ENS_TOKEN_SUBNAME));
     setLinkToken(resolver.addr(linkSubnode));
     return (link, updateOracleWithENS());
   }
@@ -521,12 +505,12 @@ contract Chainlinked {
     returns (address)
   {
     ENSResolver resolver = ENSResolver(ens.resolver(ensNode));
-    bytes32 oracleSubnode = keccak256(abi.encodePacked(ensNode, ensOracleSubname));
+    bytes32 oracleSubnode = keccak256(abi.encodePacked(ensNode, ENS_ORACLE_SUBNAME));
     setOracle(resolver.addr(oracleSubnode));
     return oracle;
   }
 
-  function encodeForOracle(ChainlinkLib.Run memory _run)
+  function encodeRequest(ChainlinkLib.Run memory _run)
     internal
     view
     returns (bytes memory)
@@ -535,49 +519,28 @@ contract Chainlinked {
       oracle.requestData.selector,
       0, // overridden by onTokenTransfer
       0, // overridden by onTokenTransfer
-      clArgsVersion,
-      _run.specId,
+      ARGS_VERSION,
+      _run.id,
       _run.callbackAddress,
       _run.callbackFunctionId,
-      _run.requestId,
+      _run.nonce,
       _run.buf.buf);
   }
 
-  function encodeForCoordinator(ChainlinkLib.Run memory _run)
+  function completeChainlinkFulfillment(bytes32 _requestId)
     internal
-    view
-    returns (bytes memory)
-  {
-    return abi.encodeWithSelector(
-      CoordinatorInterface(oracle).executeServiceAgreement.selector,
-      0, // overridden by onTokenTransfer
-      0, // overridden by onTokenTransfer
-      clArgsVersion,
-      _run.specId,
-      _run.callbackAddress,
-      _run.callbackFunctionId,
-      _run.requestId,
-      _run.buf.buf);
-  }
-
-  function serviceRequest(ChainlinkLib.Run memory _run, uint256 _amount)
-    internal
-    returns (bytes32)
-  {
-    _run.requestId = bytes32(requests);
-    requests += 1;
-    _run.close();
-    unfulfilledRequests[_run.requestId] = oracle;
-    emit ChainlinkRequested(_run.requestId);
-    require(link.transferAndCall(oracle, _amount, encodeForCoordinator(_run)), "unable to transferAndCall to oracle");
-
-    return _run.requestId;
-  }
+    checkChainlinkFulfillment(_requestId)
+  {}
 
   modifier checkChainlinkFulfillment(bytes32 _requestId) {
     require(msg.sender == unfulfilledRequests[_requestId], "source must be the oracle of the request");
     delete unfulfilledRequests[_requestId];
     emit ChainlinkFulfilled(_requestId);
+    _;
+  }
+
+  modifier isUnfulfilledRequest(bytes32 _requestId) {
+    require(unfulfilledRequests[_requestId] == address(0), "Request is already unfulfilled");
     _;
   }
 }
